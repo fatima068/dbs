@@ -854,3 +854,48 @@ SET AUTOCOMMIT ON;
 INSERT INTO employees VALUES (202, 'Sara', 40000);
 
 SET AUTOCOMMIT OFF;
+
+DECLARE
+   insufficient_balance EXCEPTION;
+   v_balance NUMBER;
+BEGIN
+   SELECT balance INTO v_balance FROM accounts WHERE acc_id = 101;
+
+   IF v_balance < 1000 THEN
+      RAISE insufficient_balance;
+   END IF;
+
+   UPDATE accounts SET balance = balance - 1000 WHERE acc_id = 101;
+   UPDATE accounts SET balance = balance + 1000 WHERE acc_id = 102;
+   COMMIT;
+   DBMS_OUTPUT.PUT_LINE('Transfer successful');
+
+EXCEPTION
+   WHEN insufficient_balance THEN
+      ROLLBACK;
+      DBMS_OUTPUT.PUT_LINE('Error: Insufficient balance in account');
+   WHEN OTHERS THEN
+      ROLLBACK;
+      DBMS_OUTPUT.PUT_LINE('Error: ' || SQLERRM);
+END;
+/
+
+DECLARE
+   v_balance NUMBER;
+BEGIN
+   SELECT balance INTO v_balance FROM accounts WHERE acc_id = 101;
+   
+   IF v_balance < 1000 THEN
+      RAISE_APPLICATION_ERROR(-20001, 'Insufficient balance');
+   END IF;
+   
+   UPDATE accounts SET balance = balance - 1000 WHERE acc_id = 101;
+   UPDATE accounts SET balance = balance + 1000 WHERE acc_id = 102;
+   COMMIT;
+   DBMS_OUTPUT.PUT_LINE('Transfer successful');
+EXCEPTION
+   WHEN OTHERS THEN
+      ROLLBACK;
+      DBMS_OUTPUT.PUT_LINE('Transfer failed: ' || SQLERRM);
+END;
+/
