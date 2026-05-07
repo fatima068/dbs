@@ -1,3 +1,316 @@
+-- LAB 8 
+
+-- ── 1a. BEFORE INSERT: print message ─────────────────────────
+CREATE OR REPLACE TRIGGER bi_Superheroes
+BEFORE INSERT ON superheroes
+FOR EACH ROW
+DECLARE
+    v_user VARCHAR2(15);
+BEGIN
+    SELECT user INTO v_user FROM dual;
+    DBMS_OUTPUT.PUT_LINE('You Just Inserted a Row Mr.' || v_user);
+END;
+/
+
+    -- ── 1d. Combined INSERT/UPDATE/DELETE — detect which operation ─
+CREATE OR REPLACE TRIGGER tr_superheroes
+BEFORE INSERT OR DELETE OR UPDATE ON superheroes
+FOR EACH ROW
+DECLARE
+    v_user VARCHAR2(15);
+BEGIN
+    SELECT user INTO v_user FROM dual;
+    IF INSERTING THEN
+        DBMS_OUTPUT.PUT_LINE('Inserted by ' || v_user);
+    ELSIF DELETING THEN
+        DBMS_OUTPUT.PUT_LINE('Deleted by '  || v_user);
+    ELSIF UPDATING THEN
+        DBMS_OUTPUT.PUT_LINE('Updated by '  || v_user);
+    END IF;
+END;
+/
+
+-- ── 1e. Table Auditing: log :NEW and :OLD into audit table ────
+CREATE OR REPLACE TRIGGER superheroes_audit
+BEFORE INSERT OR DELETE OR UPDATE ON superheroes
+FOR EACH ROW
+DECLARE
+    v_user VARCHAR2(30);
+    v_date VARCHAR2(30);
+BEGIN
+    SELECT user, TO_CHAR(SYSDATE, 'DD/MON/YYYY HH24:MI:SS')
+    INTO   v_user, v_date FROM dual;
+    IF INSERTING THEN
+        INSERT INTO sh_audit VALUES (:NEW.sh_name, NULL,          v_user, SYSDATE, 'Insert');
+    ELSIF DELETING THEN
+        INSERT INTO sh_audit VALUES (NULL,          :OLD.sh_name, v_user, SYSDATE, 'Delete');
+    ELSIF UPDATING THEN
+        INSERT INTO sh_audit VALUES (:NEW.sh_name,  :OLD.sh_name, v_user, SYSDATE, 'Update');
+    END IF;
+END;
+/
+
+-- ── 1f. Synchronized Backup: keep backup table in sync ────────
+CREATE OR REPLACE TRIGGER sh_Backup
+BEFORE INSERT OR DELETE OR UPDATE ON superheroes
+FOR EACH ROW
+BEGIN
+    IF INSERTING THEN
+        INSERT INTO superheroes_backup (sh_name) VALUES (:NEW.sh_name);
+    ELSIF DELETING THEN
+        DELETE FROM superheroes_backup WHERE sh_name = :OLD.sh_name;
+    ELSIF UPDATING THEN
+        UPDATE superheroes_backup SET sh_name = :NEW.sh_name
+        WHERE sh_name = :OLD.sh_name;
+    END IF;
+END;
+/
+
+--  DML TASK 1: Auto-bonus on employee INSERT (10% of salary)
+CREATE TABLE employee_bonus (employee_id INT, bonus INT, bonus_date DATE);
+
+CREATE OR REPLACE TRIGGER trg_auto_bonus
+AFTER INSERT ON hr.employees
+FOR EACH ROW
+BEGIN
+    INSERT INTO employee_bonus (employee_id, bonus, bonus_date)
+    VALUES (:NEW.employee_id, :NEW.salary * 0.10, SYSDATE);
+END;
+/
+    
+--  DML TASK 2: Block salary UPDATE if > 10,000
+CREATE OR REPLACE TRIGGER trg_salary_threshold
+BEFORE UPDATE ON hr.employees
+FOR EACH ROW
+BEGIN
+    IF :NEW.salary > 10000 THEN
+        RAISE_APPLICATION_ERROR(-20001, 'Error: Salary cannot exceed 10,000. Update rejected.');
+    END IF;
+END;
+/
+
+--  DML TASK 3: Log deleted employees to audit table
+CREATE OR REPLACE TRIGGER trg_log_deleted_emp
+AFTER DELETE ON hr.employees
+FOR EACH ROW
+DECLARE
+    v_user VARCHAR2(30);
+BEGIN
+    SELECT user INTO v_user FROM dual;
+    INSERT INTO deleted_employees_log
+    VALUES (:OLD.employee_id, :OLD.first_name, :OLD.last_name,
+            :OLD.salary, :OLD.job_id, v_user, SYSDATE);
+END;
+/
+    
+CREATE OR REPLACE TRIGGER hr_audit_tr
+AFTER DDL ON SCHEMA
+BEGIN
+    INSERT INTO schema_audit
+    VALUES (SYSDATE,
+            SYS_CONTEXT('USERENV', 'CURRENT_USER'),
+            ora_dict_obj_type,
+            ora_dict_obj_name,
+            ora_sysevent);
+END;
+/
+
+--  DDL TASK 1: Log every CREATE TABLE into audit_log
+CREATE OR REPLACE TRIGGER trg_log_table_create
+AFTER CREATE ON DATABASE
+DECLARE
+    v_user VARCHAR2(30);
+BEGIN
+    IF ora_dict_obj_type = 'TABLE' THEN
+        SELECT user INTO v_user FROM dual;
+        INSERT INTO audit_log (table_name, created_by, creation_time)
+        VALUES (ora_dict_obj_name, v_user, SYSDATE);
+    END IF;
+END;
+/
+
+--  DDL TASK 2: Block ALTER on employees outside business hours (8AM–6PM)
+CREATE OR REPLACE TRIGGER trg_block_alter_emp
+BEFORE ALTER ON DATABASE
+BEGIN
+    IF ora_dict_obj_name = 'EMPLOYEES' AND ora_dict_obj_owner = 'HR' THEN
+        IF TO_NUMBER(TO_CHAR(SYSDATE, 'HH24')) >= 18 OR
+           TO_NUMBER(TO_CHAR(SYSDATE, 'HH24')) < 8 THEN
+            RAISE_APPLICATION_ERROR(-20002,
+                'Error: ALTER on hr.employees is not allowed outside business hours (8AM-6PM).');
+        END IF;
+    END IF;
+END;
+/
+
+ALTER TABLE hr.employees ADD test_col VARCHAR2(10);
+
+--  DDL TASK 3: Log every DROP to drop_log
+CREATE TABLE drop_log (
+    object_name  VARCHAR2(50),
+    object_type  VARCHAR2(30),
+    dropped_by   VARCHAR2(30),
+    dropped_on   DATE
+);
+
+CREATE OR REPLACE TRIGGER trg_log_drop
+BEFORE DROP ON DATABASE
+DECLARE
+    v_user VARCHAR2(30);
+BEGIN
+    SELECT user INTO v_user FROM dual;
+    INSERT INTO drop_log (object_name, object_type, dropped_by, dropped_on)
+    VALUES (ora_dict_obj_name, ora_dict_obj_type, v_user, SYSDATE);
+END;
+/
+
+--  DDL TASK 4: Protect audit_log table from being dropped
+CREATE OR REPLACE TRIGGER trg_protect_audit_log
+BEFORE DROP ON DATABASE
+BEGIN
+    IF ora_dict_obj_name = 'AUDIT_LOG' THEN
+        RAISE_APPLICATION_ERROR(-20003, 'Warning: The audit_log table is protected and cannot be dropped.');
+    END IF;
+END;
+/
+
+-- ── Startup trigger ───────────────────────────────────────────
+CREATE OR REPLACE TRIGGER tr_startup_audit
+AFTER STARTUP ON DATABASE
+BEGIN
+    INSERT INTO startup_audit
+    VALUES (ora_sysevent, SYSDATE, TO_CHAR(SYSDATE, 'HH24:MI:SS'));
+END;
+/
+
+-- ── Schema-level LOGON / LOGOFF ───────────────────────────────
+CREATE OR REPLACE TRIGGER hr_lgon_audit
+AFTER LOGON ON SCHEMA
+BEGIN
+    INSERT INTO hr_evnt_audit
+    VALUES (ora_sysevent, SYSDATE, TO_CHAR(SYSDATE, 'HH24:MI:SS'), NULL, NULL);
+    COMMIT;
+END;
+/
+
+--  SYSTEM TASK 2: Log failed login attempts (ORA-01017 = bad password)
+CREATE TABLE failed_logins (username VARCHAR2(30), attempt_time DATE);
+
+CREATE OR REPLACE TRIGGER trg_failed_login
+AFTER SERVERERROR ON DATABASE
+DECLARE
+    v_user VARCHAR2(30);
+BEGIN
+    IF ora_is_servererror(1017) THEN
+        SELECT user INTO v_user FROM dual;
+        INSERT INTO failed_logins (username, attempt_time) VALUES (v_user, SYSDATE);
+        COMMIT;
+    END IF;
+END;
+/
+
+    --  SYSTEM TASK 3: Log session duration on logout
+CREATE TABLE user_activity_log (
+    username         VARCHAR2(30),
+    logon_time       DATE,
+    logoff_time      DATE,
+    duration_minutes NUMBER
+);
+
+-- Logon: record entry
+CREATE OR REPLACE TRIGGER trg_capture_logon
+AFTER LOGON ON DATABASE
+BEGIN
+    INSERT INTO user_activity_log (username, logon_time)
+    VALUES (USER, SYSDATE);
+    COMMIT;
+END;
+/
+
+-- Logoff: compute and store duration
+CREATE OR REPLACE TRIGGER trg_log_logout
+BEFORE LOGOFF ON DATABASE
+DECLARE
+    v_logon_time DATE;
+BEGIN
+    SELECT logon_time INTO v_logon_time
+    FROM   user_activity_log
+    WHERE  username = USER AND logoff_time IS NULL AND ROWNUM = 1
+    ORDER BY logon_time DESC;
+
+    UPDATE user_activity_log
+    SET    logoff_time      = SYSDATE,
+           duration_minutes = ROUND((SYSDATE - v_logon_time) * 24 * 60, 2)
+    WHERE  username = USER AND logoff_time IS NULL;
+    COMMIT;
+END;
+/
+
+SELECT * FROM user_activity_log;
+
+--  SECTION 4: INSTEAD OF TRIGGERS
+--  Fire on DML against VIEWS (not tables).
+--  Use when view is non-updatable (has JOINs, aggregates, etc.)
+CREATE OR REPLACE TRIGGER tr_Io_Insert
+INSTEAD OF INSERT ON db_lab_view
+FOR EACH ROW
+BEGIN
+    INSERT INTO trainer  (full_name)    VALUES (:NEW.full_name);
+    INSERT INTO subject  (subject_name) VALUES (:NEW.subject_name);
+END;
+/
+
+--  INSTEAD OF TASK 1: Insert into Employees + Departments via view
+CREATE OR REPLACE TRIGGER trgInsertEmpDept
+INSTEAD OF INSERT ON hr.empDeptView
+DECLARE
+    v_dept_count NUMBER;
+BEGIN
+    SELECT COUNT(*) INTO v_dept_count
+    FROM   hr.departments
+    WHERE  department_id = :NEW.department_id;
+
+    IF v_dept_count = 0 THEN
+        INSERT INTO hr.departments (department_id, department_name)
+        VALUES (:NEW.department_id, :NEW.department_name);
+    END IF;
+
+    INSERT INTO hr.employees
+        (employee_id, first_name, last_name, email, hire_date, job_id, salary, department_id)
+    VALUES
+        (:NEW.employee_id, :NEW.first_name, :NEW.last_name,
+         UPPER(SUBSTR(:NEW.first_name, 1, 1) || :NEW.last_name),
+         SYSDATE, 'IT_PROG', :NEW.salary, :NEW.department_id);
+END;
+/
+-- compound trigger
+    CREATE OR REPLACE TRIGGER comp_trg
+FOR INSERT OR DELETE OR UPDATE ON superheroes
+COMPOUND TRIGGER
+ v_count NUMBER := 0;
+
+ BEFORE STATEMENT IS
+ BEGIN
+   DBMS_OUTPUT.PUT_LINE('Statement started');
+ END BEFORE STATEMENT;
+
+ BEFORE EACH ROW IS
+ BEGIN
+   v_count := v_count + 1;
+ END BEFORE EACH ROW;
+
+ AFTER EACH ROW IS
+ BEGIN
+   DBMS_OUTPUT.PUT_LINE('Row processed');
+ END AFTER EACH ROW;
+
+ AFTER STATEMENT IS
+ BEGIN
+   DBMS_OUTPUT.PUT_LINE('Total rows affected: ' || v_count);
+ END AFTER STATEMENT;
+END;
+/
+
 -- LAB 10
 SET SERVEROUTPUT ON;
 
